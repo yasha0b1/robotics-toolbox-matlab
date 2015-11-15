@@ -4,6 +4,12 @@ classdef Torobot < Machine
         nservos;
         defaultSpeed;
     end
+    
+    properties (Constant)
+        %%% define some important memory locations
+        rad= pi/180;
+        deg= 180/pi;
+    end
     methods
         function torb = Torobot(varargin)
             %Torobot.Torobot Create Torobot interface object
@@ -27,6 +33,7 @@ classdef Torobot < Machine
             torb.debug = opt.debug;
             torb.nservos = opt.nservos;
             torb.connect(opt);
+
         end
         function connect(torb, opt)
             %Torobot.connect  Connect to the physical robot controller
@@ -104,7 +111,7 @@ classdef Torobot < Machine
                     'Length of POS vector must match number of ID');
             end
             for j=1:length(id)
-                format=strcat('#%dP',num2str(torb.a2pwm(pos(j))));
+                format=strcat('#%dP',num2str(torb.a2pwm(pos(j)*Torobot.deg)));
                 num2str(id(j),format);
                 cmd=strcat(cmd,num2str(id(j),format));
             end
@@ -115,6 +122,7 @@ classdef Torobot < Machine
             end
             cmd=strcat(cmd,strcat('T',speed));
             torb.command(cmd);
+            pause(str2num(speed)/1000);
         end
         function out = command(torb,  data)
             %Torobot.command Execute command on servo
@@ -156,11 +164,38 @@ classdef Torobot < Machine
         end
         function p = getpos(torb)
             %Torobot.getpos Get position
-            % getting servo position is't possible with a torobot
-            % controller
+            % since the controller isn't designed for feedback enabled servos 
+            % getting servo position is't possible with a torobot controller
             % TODO:
             % - maintain servo postion in memroy
-            char(p)=torb.flush();
+            flushValue=torb.flush();
+            p=char(flushValue.');
+        end
+        function setpath(torb, jt, t)
+            %Arbotix.setpath Load a path into Arbotix controller
+            %
+            % ARB.setpath(JT) stores the path JT (PxN) in the Arbotix controller
+            % where P is the number of points on the path and N is the number of
+            % robot joints.  Allows for smooth multi-axis motion.
+
+           
+            
+            if nargin < 3
+                t = torb.defaultSpeed;    % milliseconds between poses
+            end
+
+            % set the poses
+            %  payload: <pose#> q1 q2 .. qN
+            steps=numrows(jt);
+            torb.setpos(1:numcols(jt), jt(1,:),1000)
+            if steps<2
+                return
+            end
+            for i=2:steps
+                torb.setpos(1:numcols(jt), jt(i,:),t)
+            end
+
+            
         end
         function s = receive(torb)
             %Torobot.receive Decode Torobot return packet
@@ -170,9 +205,9 @@ classdef Torobot < Machine
             % Notes::
             % - Some Torobot commands also return diagnostic text information.
             % - If 'debug' was enabled in the constructor then the hex values are echoed
-            
             %
             % See also Torobot.command, Torobot.flush.
+            N = robot.serPort.BytesAvailable();
             if torb.debug > 0
                 fprintf('receive: ');
             end
@@ -202,10 +237,11 @@ classdef Torobot < Machine
                 N = robot.serPort.BytesAvailable();
             end
             if nargout > 0
-                out = data;
+                out=char(data.');
             end
         end
     end
+    
     methods(Static)
         function a = pwm2a(pwm)
             %Torobot.pwm2a Convert pwm to angle
