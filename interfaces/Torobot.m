@@ -219,8 +219,6 @@ classdef Torobot < Machine
             state=0;
             while ( ~stopState && N ~= 0)
                 c = fread(torb.serPort, 1, 'uint8');
-                disp(c);
-                disp(N);
                 switch state
                     case 0
                         cmdStop=[cmdStop,c];
