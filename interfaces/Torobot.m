@@ -207,16 +207,42 @@ classdef Torobot < Machine
             % - If 'debug' was enabled in the constructor then the hex values are echoed
             %
             % See also Torobot.command, Torobot.flush.
-            N = robot.serPort.BytesAvailable();
+            N = torb.serPort.BytesAvailable();
+            disp(N);
             if torb.debug > 0
                 fprintf('receive: ');
             end
-            while true
+            cmdStop=[];
+            cmdMsg=[];
+            s='';
+            stopState=false;
+            state=0;
+            while ( ~stopState && N ~= 0)
                 c = fread(torb.serPort, 1, 'uint8');
-                if torb.debug > 0
-                    fprintf(c);
+                disp(c);
+                disp(N);
+                switch state
+                    case 0
+                        cmdStop=[cmdStop,c];
+                        if(c==35)
+                            state=1;
+                        end
+                        if(c==65)
+                            stopState=true;
+                            cmdMsg=[cmdMsg,c];
+                        end
+                    case 1
+                        if(c==13 || c==10 )
+                            cmdStop=[cmdStop,c];
+                            stopState=strcmp(sprintf('%s%s',cmdStop),sprintf('%s%s',13,10));
+                        else
+                            cmdStop=[];
+                            cmdMsg=[cmdMsg,c];
+                        end              
                 end
+                N = torb.serPort.BytesAvailable();
             end
+            s=char(cmdMsg);
         end
         function out = flush(robot)
             %Torobot.flush Flush the receive buffer
@@ -232,7 +258,7 @@ classdef Torobot < Machine
             data = [];
             % this returns a maximum of input buffer size
             while (N ~= 0)
-                data = [data; fread(robot.serPort, N)];
+                data = [data, fread(robot.serPort, N)];
                 pause(0.1); % seem to need this
                 N = robot.serPort.BytesAvailable();
             end
