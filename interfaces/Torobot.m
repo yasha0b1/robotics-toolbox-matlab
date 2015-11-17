@@ -3,12 +3,21 @@ classdef Torobot < Machine
         serPort;
         nservos;
         defaultSpeed;
+        actionGroups;
     end
     
     properties (Constant)
         %%% define some important memory locations
         rad= pi/180;
         deg= 180/pi;
+        REC_VERSION_OK = 1;
+        REC_DOWN_ADDED = 2;
+        REC_DOWN_OK =3;
+        REC_READ=4
+        REC_CLEAR_CONTINUE=5;
+        REC_CLEAR_OK=6;
+        REC_ERROR = -1;
+        
     end
     methods
         function torb = Torobot(varargin)
@@ -33,7 +42,8 @@ classdef Torobot < Machine
             torb.debug = opt.debug;
             torb.nservos = opt.nservos;
             torb.connect(opt);
-
+            torb.actionGroups=0;
+            
         end
         function connect(torb, opt)
             %Torobot.connect  Connect to the physical robot controller
@@ -65,7 +75,8 @@ classdef Torobot < Machine
             if opt.verbose
                 disp('Opening connection to Torobot chain...');
             end
-            pause(0.5);
+            
+            
             try
                 fopen(torb.serPort);
             catch me
@@ -73,7 +84,18 @@ classdef Torobot < Machine
                 me.message
                 return
             end
+            pause(2);
+            disp(torb.serPort.Status);
             torb.flush();
+            torb.command('#Veri+201405201212');
+            s=torb.receive();
+            if s~=torb.REC_VERSION_OK
+                error('Controller version check failed');
+            else
+                torb.command('#VERI');
+            end
+            
+            
         end
         function disconnect(torb)
             %Torobot.disconnect  Disconnect from the physical robot controller
@@ -164,12 +186,71 @@ classdef Torobot < Machine
         end
         function p = getpos(torb)
             %Torobot.getpos Get position
-            % since the controller isn't designed for feedback enabled servos 
+            % since the controller isn't designed for feedback enabled servos
             % getting servo position is't possible with a torobot controller
             % TODO:
             % - maintain servo postion in memroy
             flushValue=torb.flush();
             p=char(flushValue.');
+        end
+        function clearAG(torb)
+            torb.command('#Clear');
+            s=torb.receive();
+            while s~=torb.REC_CLEAR_OK
+                s=torb.receive();
+                if s~=torb.REC_CLEAR_CONTINUE
+                    error('Action clearing failed');
+                end
+            end
+            
+        end
+        function executeAG(torb, ag)
+            if ag>torb.actionGroups
+                error('Action does not exist');
+            else
+                strcat('#%dGC1',num2str(ag));
+            end
+        end
+        function setAG(torb, jt, t)
+            if nargin < 3
+                t = torb.defaultSpeed;    % milliseconds between poses
+            end
+            
+            % set the poses
+            %  payload: <pose#> q1 q2 .. qN
+            steps=numrows(jt);
+            torb.command('#Down');
+            s=torb.receive();
+            if s~=torb.REC_DOWN_ADDED
+                error('Action group download failed');
+            end
+            torb.setpos(1:numcols(jt), jt(1,:),1000)
+            s=torb.receive();
+            if s~=torb.REC_DOWN_ADDED
+                error('Action group download failed');
+            end
+            if steps<2
+                torb.command('#Stop');
+                s=torb.receive();
+                if s~=torb.REC_DOWN_OK
+                    error('Action group download failed');
+                end
+                return
+            end
+            for i=2:steps
+                torb.setpos(1:numcols(jt), jt(i,:),t)
+                s=torb.receive();
+                if s~=torb.REC_DOWN_ADDED
+                    error('Action group download failed');
+                end
+            end
+            
+            torb.command('#Stop');
+            s=torb.receive();
+            if s~=torb.REC_DOWN_OK
+                error('Action group download failed');
+            end
+            
         end
         function setpath(torb, jt, t)
             %Arbotix.setpath Load a path into Arbotix controller
@@ -177,13 +258,13 @@ classdef Torobot < Machine
             % ARB.setpath(JT) stores the path JT (PxN) in the Arbotix controller
             % where P is the number of points on the path and N is the number of
             % robot joints.  Allows for smooth multi-axis motion.
-
-           
+            
+            
             
             if nargin < 3
                 t = torb.defaultSpeed;    % milliseconds between poses
             end
-
+            
             % set the poses
             %  payload: <pose#> q1 q2 .. qN
             steps=numrows(jt);
@@ -194,7 +275,7 @@ classdef Torobot < Machine
             for i=2:steps
                 torb.setpos(1:numcols(jt), jt(i,:),t)
             end
-
+            
             
         end
         function s = receive(torb)
@@ -207,8 +288,8 @@ classdef Torobot < Machine
             % - If 'debug' was enabled in the constructor then the hex values are echoed
             %
             % See also Torobot.command, Torobot.flush.
-            N = torb.serPort.BytesAvailable();
-            disp(N);
+            checkTime=0.1;
+            timeout=.5;
             if torb.debug > 0
                 fprintf('receive: ');
             end
@@ -217,8 +298,9 @@ classdef Torobot < Machine
             s='';
             stopState=false;
             state=0;
-            while ( ~stopState && N ~= 0)
+            while ( ~stopState && (timeout > 0))
                 c = fread(torb.serPort, 1, 'uint8');
+                
                 switch state
                     case 0
                         cmdStop=[cmdStop,c];
@@ -236,11 +318,24 @@ classdef Torobot < Machine
                         else
                             cmdStop=[];
                             cmdMsg=[cmdMsg,c];
-                        end              
+                        end
                 end
-                N = torb.serPort.BytesAvailable();
+                if torb.serPort.BytesAvailable()==0
+                    pause(checkTime);
+                    timeout = timeout - checkTime;
+                end
             end
-            s=char(cmdMsg);
+            str=char(cmdMsg);
+            disp(str);
+            s=torb.retDecode(str);
+            if s==torb.REC_DOWN_OK
+                tok = regexp(str,'^Down\+OK\+([0-9]+)' , 'tokens');
+                torb.actionGroups=str2double(tok{:});
+            end
+            if s==
+                tok = regexp(str,'^([0-9]+)GC' , 'tokens');
+                torb.actionGroups=str2double(tok{:});
+            end
         end
         function out = flush(robot)
             %Torobot.flush Flush the receive buffer
@@ -256,7 +351,7 @@ classdef Torobot < Machine
             data = [];
             % this returns a maximum of input buffer size
             while (N ~= 0)
-                data = [data, fread(robot.serPort, N)];
+                data = [data; fread(robot.serPort, N)];
                 pause(0.1); % seem to need this
                 N = robot.serPort.BytesAvailable();
             end
@@ -271,6 +366,27 @@ classdef Torobot < Machine
             %Torobot.pwm2a Convert pwm to angle
             % 11.11us=(1500us-pwm)/(90°-deg)
             a = floor((pwm-500.1)/11.11);
+        end
+        function ret = retDecode(str)
+            ret=Torobot.REC_ERROR;
+            if(regexp(str,'^VERI[a-zA-Z0-9+]+OK')>0)
+                ret=Torobot.REC_VERSION_OK;
+            end
+            if(strcmp(str,'A'))
+                ret=Torobot.REC_DOWN_ADD;
+            end
+            if(regexp(str,'^Down[a-zA-Z0-9+]+OK')>0)
+                ret=Torobot.REC_DOWN_OK;
+            end
+            if(regexp(str,'^([0-9]+)GC'))
+                ret=Torobot.REC_READ;
+            end
+            if(regexp(str,'C\+([0-9]+)\+OK'))
+                ret=Torobot.REC_CLEAR_CONTINUE;
+            end
+            if(strcmp(str,'CLEAR+OK'))
+                ret=Torobot.REC_CLEAR_OK;
+            end
         end
         function pwm = a2pwm(a)
             %Torobot.a2pwm Convert angle to pwm
