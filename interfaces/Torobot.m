@@ -4,6 +4,7 @@ classdef Torobot < Machine
         nservos;
         defaultSpeed;
         actionGroups;
+        servoPos
     end
     
     properties (Constant)
@@ -13,9 +14,10 @@ classdef Torobot < Machine
         REC_VERSION_OK = 1;
         REC_DOWN_ADDED = 2;
         REC_DOWN_OK =3;
-        REC_READ=4
+        REC_READ_OK=4
         REC_CLEAR_CONTINUE=5;
         REC_CLEAR_OK=6;
+        REC_AG_FINISH=7;
         REC_ERROR = -1;
         
     end
@@ -43,6 +45,8 @@ classdef Torobot < Machine
             torb.nservos = opt.nservos;
             torb.connect(opt);
             torb.actionGroups=0;
+            torb.servoPos=NaN(1,torb.nservos);
+
             
         end
         function connect(torb, opt)
@@ -110,41 +114,56 @@ classdef Torobot < Machine
         function setpos(torb, varargin)
             %Torobot.setpos Set position
             %
-            % torb.SETPOS(ID, POS) vector POS (1xN) sets the position
-            % corresponding to servos id indexed by vector ID (1xN).
+            % torb.SETPOS(ID, POS) sets the position (0-1023) of servo ID.
             % torb.SETPOS(ID, POS, SPEED) as above but also sets the speed.
-            
+            %
+            % torb.SETPOS(POS) sets the position of servos 1-N to corresponding elements
+            % of the vector POS (1xN).
+            % torb.SETPOS(POS, SPEED) as above but also sets the velocity SPEED.
+            %
             % Notes::
-            % -POS sets the position in degrees (-90,90),
-            % -ID is in the range of 1-24(16 bit torobot controller).
-            % -SPEED refers to the time of execution and represents the
-            % speed of (1xN) servos. Regardless of the number of servos,
-            % there is only one time,in the range 100-9999
-            % See also Torobot.a2pwm.
+            % - ID is in the range 1 to N
+            % - N is defined at construction time by the 'nservos' option.
+            % - SPEED is a measured in time(milliseconds) of execution and
+            %   represents the rate of movement , 
+            %   Regardless of the number of servos,
+            %   there is only one time,in the range 100-9999. 
             cmd='';
-            id = varargin{1}
-            pos = varargin{2}
-            if isempty(torb.nservos)
-                error('RTB:Torobot:notspec',...
-                    'Number of servos not specified');
-            end
-            if length(pos) ~= length(pos)
-                error('RTB:Torobot:badarg',...
-                    'Length of POS vector must match number of ID');
+            if length(varargin{1}) > 1
+                % vector mode
+                pos = varargin{1};
+                
+                if isempty(torb.nservos)
+                    error('RTB:Torobot:notspec', 'Number of servos not specified');
+                end
+                if length(pos) ~= torb.nservos
+                    error('RTB:Torobot:badarg', 'Length of POS vector must match number of servos');
+                end
+                if nargin == 3
+                    speed = num2str(varargin{2},'%d');
+                else
+                    speed = num2str(torb.defaultSpeed,'%d');
+                end
+                id=1:torb.nservos;
+            else
+                % single joint mode
+                id = varargin{1}; 
+                pos = varargin{2};
+                if nargin == 4
+                    speed = num2str(varargin{3},'%d');
+                else
+                    speed = num2str(torb.defaultSpeed,'%d');
+                end
             end
             for j=1:length(id)
                 format=strcat('#%dP',num2str(torb.a2pwm(pos(j)*Torobot.deg)));
-                num2str(id(j),format);
-                cmd=strcat(cmd,num2str(id(j),format));
-            end
-            if nargin == 4
-                speed = num2str(varargin{3},'%d');
-            else
-                speed = num2str(torb.defaultSpeed,'%d');
+                num2str(j,format);
+                cmd=strcat(cmd,num2str(j,format));
             end
             cmd=strcat(cmd,strcat('T',speed));
             torb.command(cmd);
             pause(str2num(speed)/1000);
+            torb.servoPos(id)=pos;
         end
         function out = command(torb,  data)
             %Torobot.command Execute command on servo
@@ -176,7 +195,6 @@ classdef Torobot < Machine
             %
             % C = Torobot.char() is a string that succinctly describes the status
             % of the Torobot controller link.
-            
             % show serport Status, number of servos
             s = sprintf('Torobot chain on serPort %s (%s)', ...
                 torb.serPort.port, get(torb.serPort, 'Status'));
@@ -187,64 +205,96 @@ classdef Torobot < Machine
         function p = getpos(torb)
             %Torobot.getpos Get position
             % since the controller isn't designed for feedback enabled servos
-            % getting servo position is't possible with a torobot controller
-            % TODO:
-            % - maintain servo postion in memroy
-            flushValue=torb.flush();
-            p=char(flushValue.');
+            % getting servo position is't possible with a torobot
+            % controller.
+            % the servo pose is maintained in memopry.
+            p=torb.servoPos;
         end
         function clearAG(torb)
+            %Torobot.clearAG Clears all action groups in controller nand memory
+            %
+            % See also Torobot.executeAG, Torobot.readAG, Torobot.setAG
+            torb.flush();
             torb.command('#Clear');
+            torb.receive();
             s=torb.receive();
             while s~=torb.REC_CLEAR_OK
-                s=torb.receive();
                 if s~=torb.REC_CLEAR_CONTINUE
                     error('Action clearing failed');
                 end
+                s=torb.receive();
             end
-            
+            torb.actionGroups=-1;
         end
-        function executeAG(torb, ag)
-            if ag>torb.actionGroups
-                error('Action does not exist');
-            else
-                strcat('#%dGC1',num2str(ag));
+        function stop(torb)
+           torb.command('#STOP');
+        end
+        function executeAG(torb, ag,cycles,timeout)
+            %Torobot.executeAG execute action groups
+            % Execute multiple action groups
+            % -ag (1xN) where n is a sequence of action group
+            % -cycles(optional) the number of iterations to execute 
+            %  action groups
+            % -timeout(optional) time to wait for action group sequence to
+            %  complete
+            % See also Torobot.clear, Torobot.readAG, Torobot.setAG
+            if nargin < 4                
+                timeout = 60*1000;    % default timeout
+            end
+            if nargin < 3
+                cycles = 1;    % default to one cycle 
+            end
+            torb.flush();
+            torb.readAG();
+            str='';
+            for i=1:length(ag)
+                if ag(i)>torb.actionGroups || ag(1)<=0
+                    error('action group %d does not exist', ag(i));
+                else
+                    cmd=strcat('#',strcat(num2str(ag(i)),'G'));
+                    str=strcat(str,cmd);
+                end
+            end
+            torb.flush();
+            torb.command(strcat(str,strcat('C',num2str(cycles))));
+            torb.servoPos=NaN(1,torb.nservos);
+            s=torb.receive(timeout); %set timeout to 1 minute
+            if s~=torb.REC_AG_FINISH
+                torb.flush();
+                for i=1:cycles
+                    torb.stop();
+                    pause(.1)
+                end
+                error('Action group execution failed');
             end
         end
         function setAG(torb, jt, t)
+            %Torobot.setAG sets an action group in the torobot controller
+            % torb.setAG(jt) sets an action group JT (PxN) in the Torobot controller
+            % where P is the number of points on the path and N is the number of
+            % robot joints.  
+            % torb.setAG(jt,t) same as above but assignes milliseconds 
+            % between poses
+            %See also Torobot.clearAG, Torobot.readAG, Torobot.executeAG
             if nargin < 3
                 t = torb.defaultSpeed;    % milliseconds between poses
             end
-            
-            % set the poses
-            %  payload: <pose#> q1 q2 .. qN
             steps=numrows(jt);
+            torb.flush();
             torb.command('#Down');
             s=torb.receive();
             if s~=torb.REC_DOWN_ADDED
-                error('Action group download failed');
-            end
-            torb.setpos(1:numcols(jt), jt(1,:),1000)
-            s=torb.receive();
-            if s~=torb.REC_DOWN_ADDED
-                error('Action group download failed');
-            end
-            if steps<2
                 torb.command('#Stop');
-                s=torb.receive();
-                if s~=torb.REC_DOWN_OK
-                    error('Action group download failed');
-                end
-                return
+                error('Action group download failed');
             end
-            for i=2:steps
-                torb.setpos(1:numcols(jt), jt(i,:),t)
+            for i=1:steps
+                torb.setpos(jt(i,:),t);
                 s=torb.receive();
                 if s~=torb.REC_DOWN_ADDED
+                    torb.command('#Stop');
                     error('Action group download failed');
                 end
             end
-            
             torb.command('#Stop');
             s=torb.receive();
             if s~=torb.REC_DOWN_OK
@@ -252,55 +302,56 @@ classdef Torobot < Machine
             end
             
         end
-        function setpath(torb, jt, t)
-            %Arbotix.setpath Load a path into Arbotix controller
+        function readAG(torb)
+            %Torobot.readAG reads access groups numbers stored in
+            % controller nand memory
             %
-            % ARB.setpath(JT) stores the path JT (PxN) in the Arbotix controller
+            % See also Torobot.executeAG, Torobot.clearAG, Torobot.setAG
+            torb.flush();
+            torb.command('#Read')
+            s=torb.receive();
+            if s~=torb.REC_READ_OK
+                error('Read action groups failed');
+            end
+        end
+        function setpath(torb, jt, t)
+            %Torobot.setpath execute a path on the torobot controller
+            %
+            % torb.setpath(JT) executes path JT (PxN) in the Torobot controller
             % where P is the number of points on the path and N is the number of
             % robot joints.  Allows for smooth multi-axis motion.
-            
-            
-            
-            if nargin < 3
+            if nargin < 3                 % set default speed if non provided
                 t = torb.defaultSpeed;    % milliseconds between poses
             end
-            
-            % set the poses
-            %  payload: <pose#> q1 q2 .. qN
-            steps=numrows(jt);
-            torb.setpos(1:numcols(jt), jt(1,:),1000)
-            if steps<2
-                return
+            steps=numrows(jt);            % number of poses
+            for i=1:steps
+                torb.setpos(jt(i,:),t);
             end
-            for i=2:steps
-                torb.setpos(1:numcols(jt), jt(i,:),t)
-            end
-            
-            
         end
-        function s = receive(torb)
+        function s = receive(torb,timeout)
             %Torobot.receive Decode Torobot return packet
             %
             % R = torb.RECEIVE() reads and parses the return strings
-            %
-            % Notes::
-            % - Some Torobot commands also return diagnostic text information.
-            % - If 'debug' was enabled in the constructor then the hex values are echoed
-            %
-            % See also Torobot.command, Torobot.flush.
+            % -timeout in milliseconds
+            % See also Torobot.command, Torobot.flush. 
             checkTime=0.1;
-            timeout=.5;
+            if nargin < 2                
+                timeout = 500;    % default timeout
+            end
+            timeout=timeout/1000;
             if torb.debug > 0
                 fprintf('receive: ');
             end
             cmdStop=[];
             cmdMsg=[];
             s='';
+            c='';
             stopState=false;
             state=0;
             while ( ~stopState && (timeout > 0))
-                c = fread(torb.serPort, 1, 'uint8');
-                
+                if torb.serPort.BytesAvailable()>0
+                    c = fread(torb.serPort, 1, 'uint8');
+                end
                 switch state
                     case 0
                         cmdStop=[cmdStop,c];
@@ -326,16 +377,23 @@ classdef Torobot < Machine
                 end
             end
             str=char(cmdMsg);
-            disp(str);
+            if torb.debug > 0
+                fprintf('%s\n', str);
+            end
             s=torb.retDecode(str);
+            % set number of action groups returned from Torobot.setAG
+            % function
             if s==torb.REC_DOWN_OK
                 tok = regexp(str,'^Down\+OK\+([0-9]+)' , 'tokens');
                 torb.actionGroups=str2double(tok{:});
             end
-            if s==
-                tok = regexp(str,'^([0-9]+)GC' , 'tokens');
+            % set number of action groups returned from Torobot.readAG
+            % function
+            if s==torb.REC_READ_OK
+                tok = regexp(str,'^R\+OK\+([0-9]+)' , 'tokens');
                 torb.actionGroups=str2double(tok{:});
             end
+            
         end
         function out = flush(robot)
             %Torobot.flush Flush the receive buffer
@@ -368,12 +426,13 @@ classdef Torobot < Machine
             a = floor((pwm-500.1)/11.11);
         end
         function ret = retDecode(str)
+            %Torobot.retDecode decodes return string from controller
             ret=Torobot.REC_ERROR;
             if(regexp(str,'^VERI[a-zA-Z0-9+]+OK')>0)
                 ret=Torobot.REC_VERSION_OK;
             end
             if(strcmp(str,'A'))
-                ret=Torobot.REC_DOWN_ADD;
+                ret=Torobot.REC_DOWN_ADDED;
             end
             if(regexp(str,'^Down[a-zA-Z0-9+]+OK')>0)
                 ret=Torobot.REC_DOWN_OK;
@@ -387,6 +446,13 @@ classdef Torobot < Machine
             if(strcmp(str,'CLEAR+OK'))
                 ret=Torobot.REC_CLEAR_OK;
             end
+            if(strcmp(str,'AGF'))
+                ret=Torobot.REC_AG_FINISH;
+            end
+            if(regexp(str,'R\+OK\+[0-9]+'))
+                ret=Torobot.REC_READ_OK;
+            end
+            
         end
         function pwm = a2pwm(a)
             %Torobot.a2pwm Convert angle to pwm
